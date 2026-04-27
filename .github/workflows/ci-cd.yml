@@ -25,10 +25,27 @@ env:
   AWS_REGION: ap-southeast-1
 
 jobs:
-  # ---- Job 1: Build & Push Docker images ----
+  # ---- Job 1: SonarCloud Code Quality Scan ----
+  sonarcloud:
+    name: SonarCloud Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # SonarCloud cần lấy toàn bộ history để phân tích chính xác
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  # ---- Job 2: Build & Push Docker images ----
   build-and-push:
     name: Build & Push Images
     runs-on: ubuntu-latest
+    needs: sonarcloud
 
     steps:
       - name: Checkout code
