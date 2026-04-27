@@ -1,0 +1,95 @@
+# ==============================================================
+# CI/CD Pipeline - Build, Push Docker images & Deploy to EC2
+#
+# Luồng hoạt động:
+#   Push code → Build 3 images → Push lên Docker Hub
+#   → SSM command tới EC2 → EC2 pull image mới → restart
+#
+# Secrets cần cấu hình trong GitHub repo:
+#   DOCKER_USERNAME      - Username Docker Hub
+#   DOCKER_PASSWORD      - Password hoặc Access Token Docker Hub
+#   AWS_ACCESS_KEY_ID    - AWS Access Key
+#   AWS_SECRET_ACCESS_KEY - AWS Secret Key
+# ==============================================================
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  DOCKER_USERNAME: tranhaidang27
+  AWS_REGION: ap-southeast-1
+
+jobs:
+  # ---- Job 1: Build & Push Docker images ----
+  build-and-push:
+    name: Build & Push Images
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build & Push Vote image
+        run: |
+          docker build -t ${{ env.DOCKER_USERNAME }}/vote-app:latest -t ${{ env.DOCKER_USERNAME }}/vote-app:${{ github.sha }} ./vote
+          docker push ${{ env.DOCKER_USERNAME }}/vote-app --all-tags
+
+      - name: Build & Push Result image
+        run: |
+          docker build -t ${{ env.DOCKER_USERNAME }}/result-app:latest -t ${{ env.DOCKER_USERNAME }}/result-app:${{ github.sha }} ./result
+          docker push ${{ env.DOCKER_USERNAME }}/result-app --all-tags
+
+      - name: Build & Push Worker image
+        run: |
+          docker build -t ${{ env.DOCKER_USERNAME }}/worker-app:latest -t ${{ env.DOCKER_USERNAME }}/worker-app:${{ github.sha }} ./worker
+          docker push ${{ env.DOCKER_USERNAME }}/worker-app --all-tags
+
+  # ---- Job 2: Deploy to EC2 via SSM ----
+  deploy:
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to EC2 via SSM
+        run: |
+          # Gửi lệnh tới tất cả EC2 có tag Role=voting-app
+          COMMAND_ID=$(aws ssm send-command \
+            --targets "Key=tag:Role,Values=voting-app" \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=["cd /opt/voting-app && docker compose pull && docker compose up -d --remove-orphans"]' \
+            --comment "Deploy voting-app $(date)" \
+            --query "Command.CommandId" \
+            --output text)
+
+          echo "SSM Command ID: $COMMAND_ID"
+
+          # Đợi lệnh hoàn thành (tối đa 120s)
+          aws ssm wait command-executed \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$(aws ec2 describe-instances \
+              --filters "Name=tag:Role,Values=voting-app" "Name=instance-state-name,Values=running" \
+              --query "Reservations[0].Instances[0].InstanceId" \
+              --output text)" \
+            || true
+
+          echo "✅ Deployment completed!"
